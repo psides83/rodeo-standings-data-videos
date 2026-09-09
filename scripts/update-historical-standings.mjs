@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BASE_URL = 'https://d1kfpvgfupbmyo.cloudfront.net/services/pro_rodeo.ashx/standings';
+const ATHLETE_URL = 'https://d1kfpvgfupbmyo.cloudfront.net/services/pro_rodeo.ashx/athlete';
 const DEFAULT_EVENTS = [
   'AA',
   'BB',
@@ -17,6 +18,7 @@ const DEFAULT_EVENTS = [
   'LB',
 ];
 const DEFAULT_DELAY_MS = 2500;
+const DEFAULT_ATHLETE_DELAY_MS = 750;
 const TIME_ZONE = 'America/Denver';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -178,6 +180,26 @@ async function fetchStandings({ year, event }) {
   return payload.data;
 }
 
+async function fetchAthleteBio(athleteID) {
+  const url = new URL(ATHLETE_URL);
+  url.searchParams.set('id', athleteID);
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Request failed for athlete ${athleteID}: ${response.status} ${response.statusText}`);
+  }
+
+  const payload = await response.json();
+  if (payload.error) {
+    throw new Error(`API error for athlete ${athleteID}: ${payload.error}`);
+  }
+  if (!payload.data || typeof payload.data !== 'object') {
+    throw new Error(`Unexpected response for athlete ${athleteID}: missing data object`);
+  }
+
+  return payload.data;
+}
+
 function outputPathForEvent(event, year) {
   return path.join(outputDir, `${event.toLowerCase()}-standings-${year}.csv`);
 }
@@ -188,6 +210,17 @@ function legacyOutputPathForEvent(event) {
 
 function monthColumns(header) {
   return header.filter((column) => /^\d{4}-\d{2}$/.test(column));
+}
+
+function monthKeyForIndex(year, monthIndex) {
+  return `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+}
+
+function seasonMonthColumns(year) {
+  return [
+    ...[9, 10, 11].map((monthIndex) => monthKeyForIndex(year - 1, monthIndex)),
+    ...Array.from({ length: 9 }, (_, monthIndex) => monthKeyForIndex(year, monthIndex)),
+  ];
 }
 
 function latestPriorMonthValue(row, header, monthKey) {
@@ -203,6 +236,125 @@ function latestPriorMonthValue(row, header, monthKey) {
   return '';
 }
 
+function dateMonthKey(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+function toMoney(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '';
+  return String(Math.round(number * 100) / 100);
+}
+
+function roundedMoney(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 100) / 100 : 0;
+}
+
+function standingsEarnings(standing) {
+  const value = Number(standing.Earnings);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function isNfrEntry(entry) {
+  return /\bnational finals rodeo\b/i.test(String(entry.RodeoName || ''));
+}
+
+function sumPayoffsByMonth({ athleteBio, event, year, backfillColumns }) {
+  const totals = new Map();
+  const validMonths = new Set(backfillColumns);
+  const entries = [
+    ...(Array.isArray(athleteBio.Averages) ? athleteBio.Averages : []),
+    ...(Array.isArray(athleteBio.Results) ? athleteBio.Results : []),
+  ];
+
+  for (const entry of entries) {
+    if (event !== 'AA' && String(entry.EventType || '').toUpperCase() !== event) continue;
+    if (Number(entry.SeasonYear) !== year) continue;
+    if (isNfrEntry(entry)) continue;
+
+    const monthKey = dateMonthKey(entry.EndDate || entry.StartDate);
+    if (!validMonths.has(monthKey)) continue;
+
+    const payoff = Number(entry.Payoff);
+    if (!Number.isFinite(payoff)) continue;
+
+    totals.set(monthKey, (totals.get(monthKey) || 0) + payoff);
+  }
+
+  return totals;
+}
+
+function cumulativeMonthlyTotals(monthlyTotals, backfillColumns) {
+  const cumulativeTotals = new Map();
+  let runningTotal = 0;
+
+  for (const column of backfillColumns) {
+    runningTotal += monthlyTotals.get(column) || 0;
+    cumulativeTotals.set(column, runningTotal);
+  }
+
+  return cumulativeTotals;
+}
+
+function adjustMonthlyTotalsToStandings(monthlyTotals, standingTotal, monthColumnsToAdjust = []) {
+  const totalPayoff = [...monthlyTotals.values()].reduce((sum, value) => sum + value, 0);
+  if (Math.abs(totalPayoff - standingTotal) <= 0.005) return monthlyTotals;
+
+  const adjusted = new Map(monthlyTotals);
+  const activeMonths = [...adjusted.entries()]
+    .filter(([, value]) => value > 0)
+    .map(([month]) => month);
+
+  if (totalPayoff < standingTotal) {
+    const monthsToAdjust = activeMonths.length ? activeMonths : monthColumnsToAdjust;
+    if (!monthsToAdjust.length) return adjusted;
+    const perMonthAdjustment = (standingTotal - totalPayoff) / monthsToAdjust.length;
+
+    for (const month of monthsToAdjust) {
+      adjusted.set(month, (adjusted.get(month) || 0) + perMonthAdjustment);
+    }
+
+    return adjusted;
+  }
+
+  let remainingDifference = totalPayoff - standingTotal;
+  let adjustableMonths = activeMonths;
+
+  while (remainingDifference > 0.005 && adjustableMonths.length) {
+    const perMonthAdjustment = remainingDifference / adjustableMonths.length;
+    const nextAdjustableMonths = [];
+
+    for (const month of adjustableMonths) {
+      const currentValue = adjusted.get(month);
+      const adjustment = Math.min(currentValue, perMonthAdjustment);
+      const nextValue = currentValue - adjustment;
+      adjusted.set(month, nextValue);
+      remainingDifference -= adjustment;
+
+      if (nextValue > 0.005) {
+        nextAdjustableMonths.push(month);
+      }
+    }
+
+    adjustableMonths = nextAdjustableMonths;
+  }
+
+  return adjusted;
+}
+
+function reorderHeaderForBackfill(header, year) {
+  const baseHeader = ['athleteID', 'Name', 'imageURL'];
+  const otherColumns = header.filter(
+    (column) => !baseHeader.includes(column) && !monthColumns([column]).length && column !== 'event',
+  );
+
+  return [...baseHeader, ...seasonMonthColumns(year), ...otherColumns];
+}
+
 async function main() {
   if (args.has('--scheduled') && !isLastMountainDayAtEleven()) {
     console.log('Not the last day of the month at 11 pm Mountain Time. Skipping.');
@@ -213,6 +365,11 @@ async function main() {
   const year = Number(process.env.STANDINGS_YEAR || mountainYear);
   const events = normalizeEvents();
   const delayMs = Number(process.env.REQUEST_DELAY_MS || DEFAULT_DELAY_MS);
+  const backfillMonths = args.has('--backfill-months') || process.env.BACKFILL_MONTHS === '1';
+  const backfillColumns = seasonMonthColumns(year);
+  const athleteDelayMs = Number(process.env.ATHLETE_REQUEST_DELAY_MS || DEFAULT_ATHLETE_DELAY_MS);
+  const athleteLimit = Number(process.env.BACKFILL_ATHLETE_LIMIT || 0);
+  const dryRun = args.has('--dry-run') || process.env.DRY_RUN === '1';
 
   await mkdir(outputDir, { recursive: true });
 
@@ -229,13 +386,17 @@ async function main() {
       existing = await readCsv(legacyOutputPathForEvent(event));
     }
     const baseHeader = ['athleteID', 'Name', 'imageURL'];
-    const header = existing.header.length
+    let header = existing.header.length
       ? existing.header.filter((column) => column !== 'event')
       : [...baseHeader];
     for (const column of baseHeader) {
       if (!header.includes(column)) header.push(column);
     }
-    if (!header.includes(monthKey)) header.push(monthKey);
+    if (backfillMonths) {
+      header = reorderHeaderForBackfill(header, year);
+    } else if (!header.includes(monthKey)) {
+      header.push(monthKey);
+    }
 
     const indexes = Object.fromEntries(header.map((column, index) => [column, index]));
     const rowsByAthlete = new Map();
@@ -253,7 +414,8 @@ async function main() {
       }
     }
 
-    for (const standing of standings) {
+    const standingsToProcess = athleteLimit > 0 ? standings.slice(0, athleteLimit) : standings;
+    for (const [standingIndex, standing] of standingsToProcess.entries()) {
       const athleteID = String(standing.ContestantId ?? '').trim();
       if (!athleteID) continue;
 
@@ -261,7 +423,36 @@ async function main() {
       row[indexes.athleteID] = athleteID;
       row[indexes.Name] = athleteName(standing);
       row[indexes.imageURL] = imageUrl(standing.SidearmPhotoUrl);
-      row[indexes[monthKey]] = standing.Earnings == null ? '' : String(standing.Earnings);
+      if (backfillMonths) {
+        const athleteBio = await fetchAthleteBio(athleteID);
+        const monthlyTotals = sumPayoffsByMonth({
+          athleteBio,
+          event,
+          year,
+          backfillColumns,
+        });
+        const rawTotal = [...monthlyTotals.values()].reduce((sum, value) => sum + value, 0);
+        const standingTotal = standingsEarnings(standing);
+        const adjustedTotals = adjustMonthlyTotalsToStandings(monthlyTotals, standingTotal, backfillColumns);
+        const adjustedTotal = [...adjustedTotals.values()].reduce((sum, value) => sum + value, 0);
+        const cumulativeTotals = cumulativeMonthlyTotals(adjustedTotals, backfillColumns);
+
+        for (const column of backfillColumns) {
+          row[indexes[column]] = cumulativeTotals.has(column) ? toMoney(cumulativeTotals.get(column)) : '';
+        }
+
+        if (dryRun) {
+          console.log(
+            `Backfill ${event} ${athleteID}: raw=${roundedMoney(rawTotal)} standings=${roundedMoney(standingTotal)} adjusted=${roundedMoney(adjustedTotal)}`,
+          );
+        }
+
+        if (standingIndex < standingsToProcess.length - 1 && athleteDelayMs > 0) {
+          await sleep(athleteDelayMs);
+        }
+      } else {
+        row[indexes[monthKey]] = standing.Earnings == null ? '' : String(standing.Earnings);
+      }
       rowsByAthlete.set(athleteID, row);
     }
 
@@ -269,8 +460,13 @@ async function main() {
       a[indexes.Name].localeCompare(b[indexes.Name]),
     );
 
-    await writeFile(filePath, writeCsv({ header, rows }), 'utf8');
-    console.log(`Wrote ${rows.length} rows to ${filePath}`);
+    if (dryRun) {
+      console.log(`Dry run: would write ${rows.length} rows to ${filePath}`);
+      console.log(writeCsv({ header, rows: rows.slice(0, 5) }));
+    } else {
+      await writeFile(filePath, writeCsv({ header, rows }), 'utf8');
+      console.log(`Wrote ${rows.length} rows to ${filePath}`);
+    }
 
     if (index < events.length - 1 && delayMs > 0) {
       await sleep(delayMs);
