@@ -1,0 +1,39 @@
+name: Update historical standings
+
+on:
+  schedule:
+    # GitHub Actions uses UTC. Running both hours covers 11 pm Mountain Time
+    # across daylight saving and standard time; the script exits unless the
+    # Mountain-time date is the month's final day at 11 pm.
+    - cron: '0 5,6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Update historical standings CSV on schedule
+        if: github.event_name == 'schedule'
+        run: npm run update:historical-standings:scheduled
+
+      - name: Update historical standings CSV manually
+        if: github.event_name == 'workflow_dispatch'
+        run: npm run update:historical-standings
+
+      - name: Commit CSV changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: Update historical standings CSV
+          file_pattern: data/historical-standings/*-standings-*.csv

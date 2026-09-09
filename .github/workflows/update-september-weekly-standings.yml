@@ -1,0 +1,38 @@
+name: Update September weekly standings
+
+on:
+  schedule:
+    # 6 am Mountain Time is 12:00 UTC during September daylight time.
+    # These are the remaining Mondays in September 2026: Sep 14, 21, and 28.
+    - cron: '0 12 14,21,28 9 *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Update September weekly standings on schedule
+        if: github.event_name == 'schedule'
+        run: npm run update:september-weekly-standings:scheduled
+
+      - name: Update September weekly standings manually
+        if: github.event_name == 'workflow_dispatch'
+        run: npm run update:september-weekly-standings
+
+      - name: Commit weekly CSV changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: Update September weekly standings CSV
+          file_pattern: data/september-weekly-standings/*-weekly-standings-*.csv
