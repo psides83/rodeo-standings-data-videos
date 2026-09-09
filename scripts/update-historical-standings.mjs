@@ -20,6 +20,7 @@ const DEFAULT_EVENTS = [
 const DEFAULT_DELAY_MS = 2500;
 const DEFAULT_ATHLETE_DELAY_MS = 750;
 const TIME_ZONE = 'America/Denver';
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -57,7 +58,7 @@ function currentMountainYearMonth(date = new Date()) {
   const parts = getMountainParts(date);
   return {
     year: Number(parts.year),
-    monthKey: `${parts.year}-${parts.month}`,
+    monthKey: monthLabelForKey(`${parts.year}-${parts.month}`),
   };
 }
 
@@ -208,12 +209,40 @@ function legacyOutputPathForEvent(event) {
   return path.join(outputDir, `${event.toLowerCase()}.csv`);
 }
 
+function monthLabelForKey(monthKey) {
+  const match = /^(\d{4})-(\d{2})$/.exec(monthKey);
+  if (!match) return monthKey;
+
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (monthIndex < 0 || monthIndex >= MONTH_NAMES.length) return monthKey;
+
+  return `${MONTH_NAMES[monthIndex]} ${year}`;
+}
+
+function monthKeyForColumn(column) {
+  const legacyMatch = /^(\d{4})-(\d{2})$/.exec(column);
+  if (legacyMatch) return column;
+
+  const labelMatch = /^([A-Z][a-z]{2}) (\d{4})$/.exec(column);
+  if (!labelMatch) return '';
+
+  const monthIndex = MONTH_NAMES.indexOf(labelMatch[1]);
+  if (monthIndex === -1) return '';
+
+  return `${labelMatch[2]}-${String(monthIndex + 1).padStart(2, '0')}`;
+}
+
+function normalizeMonthColumn(column) {
+  return monthLabelForKey(monthKeyForColumn(column) || column);
+}
+
 function monthColumns(header) {
-  return header.filter((column) => /^\d{4}-\d{2}$/.test(column));
+  return header.filter((column) => monthKeyForColumn(column));
 }
 
 function monthKeyForIndex(year, monthIndex) {
-  return `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+  return monthLabelForKey(`${year}-${String(monthIndex + 1).padStart(2, '0')}`);
 }
 
 function seasonMonthColumns(year) {
@@ -225,8 +254,8 @@ function seasonMonthColumns(year) {
 
 function latestPriorMonthValue(row, header, monthKey) {
   const months = monthColumns(header)
-    .filter((column) => column < monthKey)
-    .sort();
+    .filter((column) => monthKeyForColumn(column) < monthKeyForColumn(monthKey))
+    .sort((a, b) => monthKeyForColumn(a).localeCompare(monthKeyForColumn(b)));
 
   for (let index = months.length - 1; index >= 0; index -= 1) {
     const value = row[header.indexOf(months[index])];
@@ -240,7 +269,7 @@ function dateMonthKey(value) {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+  return monthLabelForKey(`${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`);
 }
 
 function toMoney(value) {
@@ -355,6 +384,10 @@ function reorderHeaderForBackfill(header, year) {
   return [...baseHeader, ...seasonMonthColumns(year), ...otherColumns];
 }
 
+function uniqueColumns(columns) {
+  return [...new Set(columns)];
+}
+
 async function main() {
   if (args.has('--scheduled') && !isLastMountainDayAtEleven()) {
     console.log('Not the last day of the month at 11 pm Mountain Time. Skipping.');
@@ -387,7 +420,7 @@ async function main() {
     }
     const baseHeader = ['athleteID', 'Name', 'imageURL'];
     let header = existing.header.length
-      ? existing.header.filter((column) => column !== 'event')
+      ? uniqueColumns(existing.header.map(normalizeMonthColumn).filter((column) => column !== 'event'))
       : [...baseHeader];
     for (const column of baseHeader) {
       if (!header.includes(column)) header.push(column);
@@ -400,10 +433,11 @@ async function main() {
 
     const indexes = Object.fromEntries(header.map((column, index) => [column, index]));
     const rowsByAthlete = new Map();
+    const existingHeader = existing.header.map(normalizeMonthColumn);
 
     for (const row of existing.rows) {
       const normalized = Array.from({ length: header.length }, (_, columnIndex) => {
-        const oldIndex = existing.header.indexOf(header[columnIndex]);
+        const oldIndex = existingHeader.indexOf(header[columnIndex]);
         return oldIndex === -1 ? '' : row[oldIndex] ?? '';
       });
       if (normalized[indexes.athleteID]) {
