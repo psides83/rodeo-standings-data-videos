@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BASE_URL = 'https://d1kfpvgfupbmyo.cloudfront.net/services/pro_rodeo.ashx/standings';
+const PHOTO_BASE_URL = 'https://d1kfpvgfupbmyo.cloudfront.net/';
 const DEFAULT_EVENTS = [
   'AA',
   'BB',
@@ -157,9 +158,16 @@ function normalizeEvents() {
 }
 
 function imageUrl(value) {
-  if (!value) return '';
-  if (/^https?:\/\//i.test(value)) return value;
-  return `https://prorodeo.com${value.startsWith('/') ? value : `/${value}`}`;
+  const text = String(value || '').trim();
+  if (!text) return '';
+
+  try {
+    const url = new URL(text);
+    const imagePath = url.pathname.replace(/^\/prorodeo\.com\/+/, '').replace(/^\/+/, '');
+    return `${PHOTO_BASE_URL}${imagePath}${url.search}`;
+  } catch {
+    return `${PHOTO_BASE_URL}${text.replace(/^\/+/, '')}`;
+  }
 }
 
 function athleteName(row) {
