@@ -2,11 +2,19 @@ name: Update historical standings
 
 on:
   schedule:
-    # GitHub Actions uses UTC. Running both hours covers 11 pm Mountain Time
-    # across daylight saving and standard time; the script exits unless the
-    # Mountain-time date is the month's final day at 11 pm.
-    - cron: '0 5,6 * * *'
+    # Collect after month-end, safely past midnight Mountain Time year-round.
+    # The script accepts delayed runs and labels scheduled snapshots for the prior month.
+    - cron: '17 8 1 * *'
   workflow_dispatch:
+    inputs:
+      standings_year:
+        description: 'Standings season year (blank uses current Mountain-time year)'
+        required: false
+        type: string
+      snapshot_month:
+        description: 'Snapshot column YYYY-MM (blank uses current month; fetches current earnings, not historical values)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -30,6 +38,9 @@ jobs:
 
       - name: Update historical standings CSV manually
         if: github.event_name == 'workflow_dispatch'
+        env:
+          STANDINGS_YEAR: ${{ inputs.standings_year }}
+          SNAPSHOT_MONTH: ${{ inputs.snapshot_month }}
         run: npm run update:historical-standings
 
       - name: Commit CSV changes

@@ -5,8 +5,6 @@
   "type": "module",
   "scripts": {
     "update:historical-standings": "node scripts/update-historical-standings.mjs",
-    "update:historical-standings:scheduled": "node scripts/update-historical-standings.mjs --scheduled",
-    "update:september-weekly-standings": "node scripts/update-september-weekly-standings.mjs",
-    "update:september-weekly-standings:scheduled": "node scripts/update-september-weekly-standings.mjs --scheduled"
+    "update:historical-standings:scheduled": "node scripts/update-historical-standings.mjs --scheduled"
   }
 }

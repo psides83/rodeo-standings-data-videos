@@ -44,15 +44,15 @@ function getMountainParts(date = new Date()) {
   return Object.fromEntries(parts.map((part) => [part.type, part.value]));
 }
 
-function isLastMountainDayAtEleven(date = new Date()) {
+function previousMountainYearMonth(date = new Date()) {
   const parts = getMountainParts(date);
   const year = Number(parts.year);
   const month = Number(parts.month);
-  const day = Number(parts.day);
-  const hour = Number(parts.hour);
-  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-
-  return day === lastDay && hour === 23;
+  const previousMonth = new Date(Date.UTC(year, month - 1, 0));
+  return {
+    year: previousMonth.getUTCFullYear(),
+    monthKey: monthLabelForKey(`${previousMonth.getUTCFullYear()}-${String(previousMonth.getUTCMonth() + 1).padStart(2, '0')}`),
+  };
 }
 
 function currentMountainYearMonth(date = new Date()) {
@@ -397,13 +397,20 @@ function uniqueColumns(columns) {
 }
 
 async function main() {
-  if (args.has('--scheduled') && !isLastMountainDayAtEleven()) {
-    console.log('Not the last day of the month at 11 pm Mountain Time. Skipping.');
-    return;
-  }
-
-  const { year: mountainYear, monthKey } = currentMountainYearMonth();
+  const { year: mountainYear, monthKey: defaultMonthKey } = args.has('--scheduled')
+    ? previousMountainYearMonth()
+    : currentMountainYearMonth();
   const year = Number(process.env.STANDINGS_YEAR || mountainYear);
+  if (!Number.isInteger(year) || year < 1900 || year > 9999) {
+    throw new Error('STANDINGS_YEAR must be a four-digit year from 1900 to 9999.');
+  }
+  const snapshotMonth = process.env.SNAPSHOT_MONTH?.trim();
+  if (snapshotMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(snapshotMonth)) {
+    throw new Error('SNAPSHOT_MONTH must use YYYY-MM format with a valid month.');
+  }
+  const monthKey = !args.has('--scheduled') && snapshotMonth
+    ? monthLabelForKey(snapshotMonth)
+    : defaultMonthKey;
   const events = normalizeEvents();
   const delayMs = Number(process.env.REQUEST_DELAY_MS || DEFAULT_DELAY_MS);
   const backfillMonths = args.has('--backfill-months') || process.env.BACKFILL_MONTHS === '1';
